@@ -1138,6 +1138,7 @@ def page_user_rfm() -> st.Page:
     ''')
     st.dataframe(df_output_, hide_index=True)
 
+st.set_page_config(layout='wide')
 
 pg = st.navigation([
     st.Page(page_business_problem, title='Vấn Đề Kinh Doanh'),
@@ -1150,3 +1151,4 @@ pg = st.navigation([
 )
 
 pg.run()
+
