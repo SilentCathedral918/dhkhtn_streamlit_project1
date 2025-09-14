@@ -23,6 +23,295 @@ max_date = df_transactions['Converted_Date'].max()
 df_merged = pd.merge(df_products, df_transactions, on='productId')
 df_merged['total_spent'] = df_merged['price'] * df_merged['items']
 
+@dataclass
+class CustomerClass:
+  label: str
+  recency: int
+  frequency: int
+  monetary: int
+  colour: str = '#ffffff'
+
+def compute_default_manual(df_rfm):
+  if 'customer_classes' not in st.session_state:
+    st.session_state.customer_classes = [
+      CustomerClass('VIP', 4, 4, 4, '#ffd700'),
+      CustomerClass('NEW', 4, 2, 2, '#1e90ff'),
+      CustomerClass('LOYAL', 3, 4, 3, '#32cd32'),
+      CustomerClass('BIG SPENDER', 2, 2, 4, '#ff4500'),
+      CustomerClass('POTENTIAL', 3, 3, 2, '#9370db'),
+      CustomerClass('AT RISK', 2, 2, 2, '#ff69b4'),
+      CustomerClass('LOST', 1, 1, 1, '#a9a9a9') 
+    ]
+
+  if 'vip_manual' not in st.session_state:
+    st.session_state.vip_manual = {
+      'Segment': 'VIP (Manual)',
+      'RecencyMean': 0,
+      'FrequencyMean': 0,
+      'MonetaryMean': 0,
+      'Count': 0,
+      'Percent': 0
+    }
+
+  if 'df_rfm' not in st.session_state:
+    st.session_state.df_rfm = pd.DataFrame()
+
+  customer_classes_ = st.session_state.customer_classes
+  class_options_ = [class_.label for class_ in customer_classes_]
+
+  def rfm_tiering(df):
+    for class_ in customer_classes_:
+      if (df['R'] == class_.recency) and (df['F'] == class_.frequency) and (df['M'] == class_.monetary):
+        return class_.label  
+
+  df_rfm['RFM_Tier'] = df_rfm.apply(rfm_tiering, axis=1)
+
+  df_rfm_agg = df_rfm.groupby('RFM_Tier').agg({
+    'Recency': 'mean',
+    'Frequency': 'mean',
+    'Monetary': ['mean', 'count']}
+  ).round(0)  
+
+  df_rfm_agg.columns = df_rfm_agg.columns.droplevel()
+  df_rfm_agg.columns = ['RecencyMean','FrequencyMean','MonetaryMean', 'Count']
+  df_rfm_agg['Percent'] = round((df_rfm_agg['Count'] / df_rfm_agg.Count.sum()) * 100, 2)
+  df_rfm_agg = df_rfm_agg.reset_index()
+
+  # TreeMap
+  fig_, ax_ = plt.subplots()
+  
+  colour_coding = {
+    class_.label: class_.colour for class_ in customer_classes_ if class_.label in df_rfm_agg['RFM_Tier'].unique()
+  }
+
+  squarify.plot(
+    sizes = df_rfm_agg['Count'],
+    text_kwargs = {'fontsize': 5, 'weight': 'regular', 'fontname': 'sans serif'},
+    label = ['{} \n{:.0f} days \n{:.0f} orders \n{:.0f} $ \n{:.0f} customers ({}%)'.format(*df_rfm_agg.iloc[i]) for i in range(0, len(df_rfm_agg))],
+    color=[colour_coding.get(label_, '#ffffff') for label_ in df_rfm_agg['RFM_Tier']],
+    alpha = 0.5
+  )
+  plt.axis('off')
+
+  st.session_state['treemap_manual'] = fig_
+
+  # Scatter
+  colour_coding = {
+    class_.label: class_.colour for class_ in customer_classes_ if class_.label in df_rfm_agg['RFM_Tier'].unique()
+  }
+
+  fig_ = px.scatter(
+    df_rfm_agg,
+    x='RecencyMean',
+    y='MonetaryMean',
+    size='FrequencyMean',
+    color='RFM_Tier',
+    color_discrete_map=colour_coding,
+    hover_name='RFM_Tier',
+    hover_data=['Count', 'Percent']
+  )
+
+  st.session_state['scatter_manual'] = fig_
+
+  # Save VIP for manual segmentation 
+  vip_ = df_rfm_agg[df_rfm_agg['RFM_Tier'] == 'VIP']
+  if not vip_.empty:
+    row_ = vip_.iloc[0]
+    st.session_state.vip_manual = {
+      'Segment': 'VIP (Manual)',
+      'RecencyMean': row_['RecencyMean'],
+      'FrequencyMean': row_['FrequencyMean'],
+      'MonetaryMean': row_['MonetaryMean'],
+      'Count': row_['Count'],
+      'Percent': row_['Percent']
+    }
+
+  st.session_state.df_rfm = df_rfm
+
+def compute_default_kmeans(df_rfm):
+  if 'vip_kmeans' not in st.session_state:
+    st.session_state.vip_kmeans = {
+      'Segment': 'VIP (KMeans)',
+      'RecencyMean': 0,
+      'FrequencyMean': 0,
+      'MonetaryMean': 0,
+      'Count': 0,
+      'Percent': 0
+    }
+
+  if 'df_rfm' not in st.session_state:
+    st.session_state.df_rfm_km = pd.DataFrame()
+
+  df_rfm_km = df_rfm[['Recency','Frequency','Monetary']]
+
+  scaler_ = RobustScaler()
+  df_rfm_km_scaled = scaler_.fit_transform(df_rfm_km)
+
+  if 'kmeans_selected_k' not in st.session_state:
+    st.session_state.kmeans_selected_k = 4
+
+  selected_k_ = st.session_state.kmeans_selected_k
+
+  model_ = KMeans(n_clusters=selected_k_, random_state=42)
+  model_.fit(df_rfm_km_scaled)
+
+  df_rfm_km['Cluster'] = model_.labels_
+
+  df_rfm_agg2 = df_rfm_km.groupby('Cluster').agg({
+    'Recency': 'mean',
+    'Frequency': 'mean',
+    'Monetary': ['mean', 'count']}
+  ).round(0)
+
+  df_rfm_agg2.columns = df_rfm_agg2.columns.droplevel()
+  df_rfm_agg2.columns = ['RecencyMean','FrequencyMean','MonetaryMean', 'Count']
+  df_rfm_agg2['Percent'] = round((df_rfm_agg2['Count'] / df_rfm_agg2.Count.sum()) * 100, 2)
+
+  df_rfm_agg2 = df_rfm_agg2.reset_index()
+
+  df_rfm_agg2['Cluster'] = 'Cluster '+ df_rfm_agg2['Cluster'].astype('str')
+
+  st.markdown('\b')
+
+  # Tree Map
+  fig_, ax_ = plt.subplots(figsize=(10, 6))
+
+  cluster_labels_ = df_rfm_agg2['Cluster'].tolist()
+  colours_ = plt.cm.Set3.colors[:len(cluster_labels_)]
+
+  squarify.plot(
+    sizes=df_rfm_agg2['Count'],
+    label = ['{} \n{:.0f} days \n{:.0f} orders \n{:.0f} $ \n{:.0f} customers ({}%)'.format(*df_rfm_agg2.iloc[i]) for i in range(0, len(df_rfm_agg2))],
+    color=colours_,
+    text_kwargs={'fontsize': 5, 'weight': 'regular', 'fontname': 'sans serif'},
+    alpha=0.6
+  )
+  plt.axis('off')
+
+  st.session_state['treemap_kmeans'] = fig_
+
+  # Scatter
+  fig_ = px.scatter(
+    df_rfm_agg2,
+    x='RecencyMean',
+    y='MonetaryMean',
+    size='FrequencyMean',
+    color='Cluster',
+    hover_name='Cluster',
+    hover_data=['Count', 'Percent']
+  )
+
+  st.session_state['scatter_kmeans'] = fig_
+
+  # Save VIP for KMeans clustering
+  df_rfm_agg2_ranked = df_rfm_agg2.sort_values(
+    by=['FrequencyMean', 'MonetaryMean', 'RecencyMean'],
+    ascending=[False, False, True]
+  )
+
+  vip_ = df_rfm_agg2_ranked.iloc[0]
+  if not vip_.empty:
+    st.session_state.vip_kmeans = {
+      'Segment': f"{vip_['Cluster']} (KMeans - VIP)",
+      'RecencyMean': vip_['RecencyMean'],
+      'FrequencyMean': vip_['FrequencyMean'],
+      'MonetaryMean': vip_['MonetaryMean'],
+      'Count': vip_['Count'],
+      'Percent': vip_['Percent']
+    }
+
+  st.session_state.df_rfm_km = df_rfm_km
+
+def compute_default_hierarchical(df_rfm):
+  if 'vip_hierarchical' not in st.session_state:
+    st.session_state.vip_hierarchical = {
+      'Segment': 'VIP (Hierarchical)',
+      'RecencyMean': 0,
+      'FrequencyMean': 0,
+      'MonetaryMean': 0,
+      'Count': 0,
+      'Percent': 0
+    }
+
+  if 'df_rfm' not in st.session_state:
+    st.session_state.df_rfm_hc = pd.DataFrame()
+  
+  df_rfm_hc = df_rfm[['Recency','Frequency','Monetary']]
+
+  scaler_ = RobustScaler()
+  df_rfm_hc_scaled = scaler_.fit_transform(df_rfm_hc)
+
+  if 'hierarchical_selected_k' not in st.session_state:
+    st.session_state.hierarchical_selected_k = 4
+
+  selected_k_ = st.session_state.hierarchical_selected_k
+
+  model_ = AgglomerativeClustering(n_clusters=selected_k_)
+  pred_ = model_.fit_predict(df_rfm_hc_scaled)
+
+  df_rfm_hc['Cluster'] = pred_
+  
+  df_rfm_agg3 = df_rfm_hc.groupby('Cluster').agg({
+    'Recency':'mean',
+    'Frequency':'mean',
+    'Monetary':['mean', 'count']
+  }).round(2)
+
+  df_rfm_agg3.columns = df_rfm_agg3.columns.droplevel()
+  df_rfm_agg3.columns = ['RecencyMean','FrequencyMean','MonetaryMean', 'Count']
+  df_rfm_agg3['Percent'] = round((df_rfm_agg3['Count'] / df_rfm_agg3.Count.sum()) * 100, 2)
+
+  df_rfm_agg3 = df_rfm_agg3.reset_index()
+  df_rfm_agg3['Cluster'] = 'Cluster '+ df_rfm_agg3['Cluster'].astype('str')
+
+  fig_, ax_ = plt.subplots(figsize=(10, 6))
+
+  cluster_labels_ = df_rfm_agg3['Cluster'].tolist()
+  colours_ = plt.cm.Set3.colors[:len(cluster_labels_)]
+
+  squarify.plot(
+    sizes=df_rfm_agg3['Count'],
+    label = ['{} \n{:.0f} days \n{:.0f} orders \n{:.0f} $ \n{:.0f} customers ({}%)'.format(*df_rfm_agg3.iloc[i]) for i in range(0, len(df_rfm_agg3))],
+    color=colours_,
+    text_kwargs={'fontsize': 5, 'weight': 'regular', 'fontname': 'sans serif'},
+    alpha=0.6
+  )
+  plt.axis('off')
+
+  st.session_state['treemap_hierarchical'] = fig_
+
+  # Scatter
+  fig_ = px.scatter(
+    df_rfm_agg3,
+    x='RecencyMean',
+    y='MonetaryMean',
+    size='FrequencyMean',
+    color='Cluster',
+    hover_name='Cluster',
+    hover_data=['Count', 'Percent']
+  )
+
+  st.session_state['scatter_hierarchical'] = fig_
+
+  # Save VIP for hierarchical clustering
+  df_rfm_agg3_ranked = df_rfm_agg3.sort_values(
+    by=['FrequencyMean', 'MonetaryMean', 'RecencyMean'],
+    ascending=[False, False, True]
+  )
+
+  vip_ = df_rfm_agg3_ranked.iloc[0]
+  if not vip_.empty:
+    st.session_state.vip_hierarchical = {
+      'Segment': f"{vip_['Cluster']} (Hierarchical - VIP)",
+      'RecencyMean': vip_['RecencyMean'],
+      'FrequencyMean': vip_['FrequencyMean'],
+      'MonetaryMean': vip_['MonetaryMean'],
+      'Count': vip_['Count'],
+      'Percent': vip_['Percent']
+    }
+
+  st.session_state.df_rfm_hc = df_rfm_hc
+
 # ======================== User Interface ======================== #
 
 def page_business_problem() -> st.Page:
@@ -173,14 +462,6 @@ def page_eda() -> st.Page:
   st.line_chart(filtered_revenue_.set_index('Converted_Date'), color='#ffaa00')
 
 def page_analysis_pred() -> st.Page:
-  @dataclass
-  class CustomerClass:
-    label: str
-    recency: int
-    frequency: int
-    monetary: int
-    colour: str = '#ffffff'
-  
   f_recency = lambda x: (max_date - x.max()).days
   f_frequency = lambda x: len(x.unique())
   f_monetary = lambda x : round(sum(x), 2)
@@ -208,6 +489,10 @@ def page_analysis_pred() -> st.Page:
   df_rfm['RFM_Segment'] = df_rfm.apply(join_rfm, axis=1)
   df_rfm['RFM_Score'] = df_rfm[['R','F','M']].sum(axis=1)
   
+  compute_default_manual(df_rfm)
+  compute_default_kmeans(df_rfm)
+  compute_default_hierarchical(df_rfm)
+
   # ----------- Interface ----------- #
 
   st.markdown('''
@@ -218,7 +503,8 @@ def page_analysis_pred() -> st.Page:
   options_ = [
     'Manual', 
     'KMeans', 
-    'Hierarchical']
+    'Hierarchical'
+  ]
 
   selected_option_ = st.selectbox(
     label='Chọn phương pháp',
@@ -228,30 +514,6 @@ def page_analysis_pred() -> st.Page:
   with st.container(border=True):
     # -------------- Manual Segmentation -------------- #
     if selected_option_ == 'Manual':
-      if 'customer_classes' not in st.session_state:
-        st.session_state.customer_classes = [
-          CustomerClass('VIP', 4, 4, 4, '#ffd700'),
-          CustomerClass('NEW', 4, 2, 2, '#1e90ff'),
-          CustomerClass('LOYAL', 3, 4, 3, '#32cd32'),
-          CustomerClass('BIG SPENDER', 2, 2, 4, '#ff4500'),
-          CustomerClass('POTENTIAL', 3, 3, 2, '#9370db'),
-          CustomerClass('AT RISK', 2, 2, 2, '#ff69b4'),
-          CustomerClass('LOST', 1, 1, 1, '#a9a9a9') 
-        ]
-
-      if 'vip_manual' not in st.session_state:
-        st.session_state.vip_manual = {
-          'Segment': 'VIP (Manual)',
-          'RecencyMean': 0,
-          'FrequencyMean': 0,
-          'MonetaryMean': 0,
-          'Count': 0,
-          'Percent': 0
-        }
-
-      if 'df_rfm' not in st.session_state:
-        st.session_state.df_rfm = pd.DataFrame()
-
       customer_classes_ = st.session_state.customer_classes
       class_options_ = [class_.label for class_ in customer_classes_]
 
@@ -375,19 +637,6 @@ def page_analysis_pred() -> st.Page:
 
     # -------------- KMeans Segmentation -------------- #
     elif selected_option_ == 'KMeans':
-      if 'vip_kmeans' not in st.session_state:
-        st.session_state.vip_kmeans = {
-          'Segment': 'VIP (KMeans)',
-          'RecencyMean': 0,
-          'FrequencyMean': 0,
-          'MonetaryMean': 0,
-          'Count': 0,
-          'Percent': 0
-        }
-
-      if 'df_rfm' not in st.session_state:
-        st.session_state.df_rfm_km = pd.DataFrame()
-
       df_rfm_km = df_rfm[['Recency','Frequency','Monetary']]
 
       scaler_ = RobustScaler()
@@ -726,9 +975,6 @@ def page_analysis_pred() -> st.Page:
       st.session_state.df_rfm_hc = df_rfm_hc
 
 def page_eval_report() -> st.Page:
-  if 'selected_method' not in st.session_state:
-    st.session_state.selected_method = 'Manual'
-  
   st.markdown('''
     # ĐÁNH GIÁ & BÁO CÁO
     \b
@@ -769,140 +1015,136 @@ def page_eval_report() -> st.Page:
     .format(precision=2)
   )
 
-  # method selection
-  with st.container(border=True):
-    st.markdown('### Chọn một Phương pháp')
-    
-    selection_row_ = st.columns(3)
-
-    with selection_row_[0]:
-      if st.button('Manual' + (' ✅' if st.session_state.selected_method == 'Manual' else ''), width='stretch'):
-          st.session_state.selected_method = 'Manual'
-          st.rerun()
-
-    with selection_row_[1]:
-      if st.button('KMeans' + (' ✅' if st.session_state.selected_method == 'KMeans' else ''), width='stretch'):
-          st.session_state.selected_method = 'KMeans'
-          st.rerun()
-
-    with selection_row_[2]:
-      if st.button('Hierarchical' + (' ✅' if st.session_state.selected_method == 'Hierarchical' else ''), width='stretch'):
-          st.session_state.selected_method = 'Hierarchical'
-          st.rerun()
-
-def page_recommendation() -> st.Page:
+def page_user_rfm() -> st.Page:
   st.markdown('''
-    # KHUYẾN NGHỊ
+    # RFM
     \b
   ''')
 
-  if 'selected_top_n' not in st.session_state:
-    st.session_state.selected_top_n = 5 
-
-  selected_method_ = st.session_state.selected_method
-
-  df_rfm_ = st.session_state.df_rfm
-  df_rfm_km_ = st.session_state.df_rfm_km
-  df_rfm_hc_ = st.session_state.df_rfm_hc
-
-  st.markdown(f'''
-    #### Phương pháp đã chọn: :blue[{selected_method_}]
-    \b
-  ''')
+  selected_r_ = st.number_input(
+    label='Recency (day duration since last purchase)', 
+    min_value=0, 
+    value=2
+  )
   
-  st.markdown(f'#### Sản phẩm được mua nhiều nhất theo Phân khúc')
+  selected_f_ = st.number_input(
+    label='Frequency (how many times)', 
+    min_value=1, 
+    value=20
+  )
 
-  with st.container(border=True):
-    top_n_ = st.number_input(
-      label='Số sản phẩm', 
-      min_value=1, 
-      max_value=df_products['productName'].nunique(),
-      value=5
-    )
+  selected_m_ = st.number_input(
+    label='Monetary ($)', 
+    min_value=1.0, 
+    value=200.0,
+  )
 
-    if st.session_state.selected_top_n != top_n_:
-      st.session_state.selected_top_n = top_n_
-      st.rerun()
+  options_ = [
+    'Manual', 
+    'KMeans', 
+    'Hierarchical']
 
-    top_n_product_ids_ = df_transactions.groupby('productId')['items'].sum().nlargest(st.session_state.selected_top_n).index.tolist()
+  selected_option_ = st.selectbox(
+    label='Chọn phương pháp',
+    options=options_
+  )
 
-    if selected_method_ == 'Manual':
-      df_rfm_ = df_rfm_.reset_index()
-      df_merged = df_transactions[df_transactions['productId'].isin(top_n_product_ids_)]
-      df_merged = df_merged.merge(df_rfm_[['Member_number', 'RFM_Tier']], on='Member_number', how='left')
-      df_merged = df_merged.merge(df_products[['productId', 'productName']], on='productId', how='left')
+  input_data_ = [[selected_r_, selected_f_, selected_m_]]
+  col_names_ = ['Recency', 'Frequency', 'Monetary']
+  df_input_ = pd.DataFrame(input_data_, columns=col_names_)
 
-      purchase_counts_ = df_merged.groupby(['RFM_Tier', 'productName'])['items'].sum().reset_index()
+  # -------------- Manual Segmentation -------------- #
+  if selected_option_ == 'Manual':
+    r_labels = range(4, 0, -1)
+    f_labels = range(1, 5)
+    m_labels = range(1, 5)
 
-      fig_ = px.bar(
-        purchase_counts_,
-        x='items',
-        y='productName',
-        color='RFM_Tier',
-        orientation='h',
-        title='Top Purchased Products by Segment',
-        labels={'items': 'Total Items Purchased', 'productName': 'Product'},
-        barmode='group',
-        height=600
-      )
+    df_rfm_ = st.session_state.df_rfm.copy()
+    df_rfm_ = pd.concat([df_rfm_, df_input_], ignore_index=True)
 
-      fig_.update_layout(yaxis={'categoryorder':'total ascending'})
-      st.plotly_chart(fig_)
+    r_groups = pd.qcut(df_rfm_['Recency'].rank(method='first'), q=4, labels=r_labels)
+    f_groups = pd.qcut(df_rfm_['Frequency'].rank(method='first'), q=4, labels=f_labels)
+    m_groups = pd.qcut(df_rfm_['Monetary'].rank(method='first'), q=4, labels=m_labels)
 
-    elif selected_method_ == 'KMeans':
-      df_rfm_km_ = df_rfm_km_.reset_index()
-      df_merged = df_transactions[df_transactions['productId'].isin(top_n_product_ids_)]
-      df_merged = df_merged.merge(df_rfm_km_[['Member_number', 'Cluster']], on='Member_number', how='left')
-      df_merged = df_merged.merge(df_products[['productId', 'productName']], on='productId', how='left')
+    def join_rfm(x): return str(int(x['R'])) + str(int(x['F'])) + str(int(x['M']))
 
-      purchase_counts_ = df_merged.groupby(['Cluster', 'productName'])['items'].sum().reset_index()
-      purchase_counts_['Cluster'] = purchase_counts_['Cluster'].astype(str)
+    df_rfm_ = df_rfm_.assign(R = r_groups.values, F = f_groups.values,  M = m_groups.values)
+    df_rfm_['RFM_Segment'] = df_rfm_.apply(join_rfm, axis=1)
+    df_rfm_['RFM_Score'] = df_rfm_[['R','F','M']].sum(axis=1)
+    
+    customer_classes_ = st.session_state.customer_classes
 
-      fig_ = px.bar(
-        purchase_counts_,
-        x='items',
-        y='productName',
-        color='Cluster',
-        orientation='h',
-        title='Top Purchased Products by Segment',
-        labels={'items': 'Total Items Purchased', 'productName': 'Product'},
-        barmode='group',
-        height=600
-      )
+    def rfm_tiering(df):
+      for class_ in customer_classes_:
+        if (df['R'] == class_.recency) and (df['F'] == class_.frequency) and (df['M'] == class_.monetary):
+          return class_.label  
+        
+    df_rfm_['RFM_Tier'] = df_rfm_.apply(rfm_tiering, axis=1)
 
-      fig_.update_layout(yaxis={'categoryorder':'total ascending'})
-      st.plotly_chart(fig_)
+    df_output_ = df_rfm_.tail(1).reset_index()[
+      ['Recency', 'Frequency', 'Monetary', 'R', 'F', 'M', 'RFM_Tier']
+    ]
 
-    elif selected_method_ == 'Hierarchical':
-      df_rfm_hc_ = df_rfm_hc_.reset_index()
-      df_merged = df_transactions[df_transactions['productId'].isin(top_n_product_ids_)]
-      df_merged = df_merged.merge(df_rfm_hc_[['Member_number', 'Cluster']], on='Member_number', how='left')
-      df_merged = df_merged.merge(df_products[['productId', 'productName']], on='productId', how='left')
+    st.markdown('''
+      \b
+      ### Kết Quả
+    ''')
+    st.dataframe(df_output_, hide_index=True)
 
-      purchase_counts_ = df_merged.groupby(['Cluster', 'productName'])['items'].sum().reset_index()
-      purchase_counts_['Cluster'] = purchase_counts_['Cluster'].astype(str)
 
-      fig_ = px.bar(
-        purchase_counts_,
-        x='items',
-        y='productName',
-        color='Cluster',
-        orientation='h',
-        title='Top Purchased Products by Segment',
-        labels={'items': 'Total Items Purchased', 'productName': 'Product'},
-        barmode='group',
-        height=600
-      )
+  # -------------- KMeans Segmentation -------------- #
+  elif selected_option_ == 'KMeans':
+    df_rfm_km_ = st.session_state.df_rfm_km.copy()[['Recency', 'Frequency', 'Monetary']]
+    df_rfm_km_ = pd.concat([df_rfm_km_, df_input_], ignore_index=True)
 
-      fig_.update_layout(yaxis={'categoryorder':'total ascending'})
-      st.plotly_chart(fig_)
+    scaler_ = RobustScaler()
+    df_rfm_km_scaled_ = scaler_.fit_transform(df_rfm_km_)
+
+    model_ = KMeans(n_clusters=st.session_state.kmeans_selected_k, random_state=42)
+    model_.fit(df_rfm_km_scaled_)
+
+    df_rfm_km_['Cluster'] = model_.labels_
+
+    df_output_ = df_rfm_km_.tail(1).reset_index()[
+      ['Recency', 'Frequency', 'Monetary', 'Cluster']
+    ]
+
+    st.markdown('''
+      \b
+      ### Kết Quả
+    ''')
+    st.dataframe(df_output_, hide_index=True)
+
+  # -------------- Hierarchical Segmentation -------------- #
+  elif selected_option_ == 'Hierarchical':
+    df_rfm_hc_ = st.session_state.df_rfm_hc.copy()[['Recency','Frequency','Monetary']]
+    df_rfm_hc_ = pd.concat([df_rfm_hc_, df_input_], ignore_index=True)
+
+    scaler_ = RobustScaler()
+    df_rfm_hc_scaled = scaler_.fit_transform(df_rfm_hc_)
+
+    model_ = AgglomerativeClustering(n_clusters=st.session_state.hierarchical_selected_k)
+    pred_ = model_.fit_predict(df_rfm_hc_scaled)
+
+    df_rfm_hc_['Cluster'] = pred_
+
+    df_output_ = df_rfm_hc_.tail(1).reset_index()[
+      ['Recency', 'Frequency', 'Monetary', 'Cluster']
+    ]
+
+    st.markdown('''
+      \b
+      ### Kết Quả
+    ''')
+    st.dataframe(df_output_, hide_index=True)
+
 
 pg = st.navigation([
     st.Page(page_business_problem, title='Vấn Đề Kinh Doanh'),
     st.Page(page_eda, title='Tổng Quan Dữ Liệu'),
     st.Page(page_analysis_pred, title='Phân Tích & Dự Đoán'),
     st.Page(page_eval_report, title='Đánh giá & Báo cáo'),
-    st.Page(page_recommendation, title='Khuyến nghị')
+    st.Page(page_user_rfm, title='RFM')
   ],
   position='top'
 )
